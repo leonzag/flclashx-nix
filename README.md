@@ -1,0 +1,129 @@
+# FlClashX для NixOS
+
+Самостоятельный flake с готовым пакетом FlClashX и модулем NixOS для TUN.
+Используется официальный `.deb` версии **0.4.2**, без компиляции приложения
+и без изменения исходников GUI или ядра.
+
+## Подключение
+
+В `flake.nix` конфигурации NixOS:
+
+```nix
+inputs.flclashx = {
+  url = "github:leonzag/flclashx-nix";
+  inputs.nixpkgs.follows = "nixpkgs";
+};
+```
+
+В модуле хоста, которому передан `inputs` через `specialArgs`:
+
+```nix
+{ inputs, ... }:
+{
+  imports = [ inputs.flclashx.nixosModules.default ];
+  programs.flclashx.enable = true;
+}
+```
+
+Overlay не требуется. Модуль собирает пакет средствами `pkgs` хоста.
+Если репозиторий private, Nix требуется доступ к нему; токены не следует
+записывать в конфигурацию, хранящуюся в Git.
+
+Закрой ранее запущенный FlClashX, затем выполни:
+
+```bash
+sudo nixos-rebuild test --flake .#hostname
+flclashx
+```
+
+После проверки GUI и TUN можно применить конфигурацию для загрузок:
+
+```bash
+sudo nixos-rebuild switch --flake .#hostname
+```
+
+## Что делает модуль
+
+- Сохраняет полный bundle: GUI, ядро, библиотеки Flutter, плагины и ресурсы.
+- Через `autoPatchelfHook` настраивает ELF interpreter и зависимости NixOS.
+  Отсутствующие зависимости не игнорируются, а останавливают сборку.
+- Добавляет библиотеки Ayatana, libdbusmenu, keybinder3, libepoxy и libglvnd,
+  включая библиотеки, которые приложение загружает динамически.
+- Сервис `flclashx-install` размещает принадлежащую root копию bundle
+  в `/opt/FlClashX-versions/<имя-пакета>` и переключает `/opt/FlClashX` на неё.
+  Это копия вне `/nix/store`, а не ссылка на исходный bundle в store.
+- Только `FlClashCore` получает `root:root` и права `4755`. GUI запускается
+  обычным пользователем. Каталоги и библиотеки недоступны ему для записи.
+- Пакет остаётся частью системной конфигурации: библиотечные зависимости
+  в `/nix/store` защищены от GC, пока используется соответствующая генерация.
+- Launcher `flclashx` подготавливает окружение GTK и системного GPU-драйвера,
+  затем запускает настоящий GUI из `/opt`, рядом с ядром.
+- Сервис удаляет свои копии с setuid при остановке. Откат через rebuild
+  восстанавливает нужную версию из сохранённого Nix-пакета.
+- Добавляет TUN-интерфейс `FlClashX` в доверенные интерфейсы firewall.
+  Reverse-path filtering не ослабляется.
+
+Установка рассчитана на NixOS `x86_64-linux`. Один `nix run` не создаёт
+каталог `/opt`: сначала нужно включить модуль и выполнить rebuild.
+
+## Настройки
+
+```nix
+programs.flclashx = {
+  enable = true;
+  autostart = true;             # значение по умолчанию
+  tunInterface = "FlClashX";    # значение по умолчанию
+  # package = ...;             # можно переопределить подготовленный пакет
+};
+```
+
+Системная запись автозапуска использует `flclashx` и располагается
+в `/etc/xdg/autostart/FlClashX.desktop`.
+Старый пользовательский `~/.config/autostart/FlClashX.desktop` может
+перекрывать её и ссылаться на прошлую установку; такую запись нужно убрать.
+Для ручного запуска используй `flclashx`, чтобы получить окружение GTK.
+
+## Обновление
+
+В конфигурации NixOS:
+
+```bash
+nix flake update flclashx
+sudo nixos-rebuild switch --flake .#hostname
+```
+
+Обновление input получает новую версию **упаковки**, а не автоматически
+новый релиз приложения. Для перехода на следующий официальный релиз
+в этом репозитории меняются `version` и SHA-256 `.deb` в `package.nix`.
+
+Перед обновлением закрой FlClashX. Встроенное обновление ядра не используется:
+оно не может заменить root-owned бинарник. Профили и настройки пользователя
+находятся вне `/opt` и не удаляются при обновлении или отключении модуля.
+
+## Диагностика
+
+```bash
+systemctl status flclashx-install --no-pager
+stat -Lc '%U:%G %a %n' /opt/FlClashX/FlClashCore /opt/FlClashX/FlClashX
+ip link show FlClashX
+curl -4 --noproxy '*' --connect-timeout 5 --max-time 15 https://ipinfo.io/ip
+```
+
+Ожидаемые права: `root:root 4755` для ядра, `root:root 755` для GUI.
+При монтировании `/opt` с `nosuid` setuid не будет действовать.
+
+## Проверки
+
+```bash
+nix flake check --no-write-lock-file -L
+sudo python3 tests/test_install.py
+```
+
+Flake check собирает бинарный пакет с проверками ресурсов и зависимостей,
+а также проверяет установщик через ShellCheck в минимальной конфигурации
+NixOS с включённым модулем. Восемь тестов установщика работают во временном
+каталоге и проверяют установку, права, обновление, откат и очистку.
+GUI, настоящий TUN и конкретный GPU проверяются на целевом компьютере.
+
+Разработчики приложения: [pluralplay/FlClashX](https://github.com/pluralplay/FlClashX).
+Лицензия upstream-приложения: GPL-3.0-only.
