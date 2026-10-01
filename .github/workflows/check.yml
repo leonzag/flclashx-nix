@@ -1,0 +1,25 @@
+name: Check FlClashX
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Check package, NixOS module and installer
+        run: nix flake check --no-write-lock-file -L
+      - name: Test installation, update, rollback and cleanup
+        run: sudo python3 tests/test_install.py
+      - name: Record source hash for reproducible integration
+        run: |
+          nix flake metadata --json --no-write-lock-file | python3 -c 'import json,sys; data=json.load(sys.stdin); print("SOURCE_NAR_HASH=" + data["locked"]["narHash"])'
