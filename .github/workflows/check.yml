@@ -13,13 +13,17 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
       - uses: cachix/install-nix-action@v31
         with:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
       - name: Check package, NixOS module and installer
         run: nix flake check --no-write-lock-file -L
       - name: Test installation, update, rollback and cleanup
-        run: sudo python3 tests/test_install.py
+        run: |
+          git show b44576d89a9a35e71ce76638970b054b865bf0b2:install.sh > "$RUNNER_TEMP/legacy-install.sh"
+          sudo env FLCLASHX_LEGACY_INSTALLER="$RUNNER_TEMP/legacy-install.sh" python3 tests/test_install.py
       - name: Record source hash for reproducible integration
         run: |
           nix flake metadata --json --no-write-lock-file | python3 -c 'import json,sys; data=json.load(sys.stdin); print("SOURCE_NAR_HASH=" + data["locked"]["narHash"])'
