@@ -9,11 +9,7 @@ let
   cfg = config.programs.flclashx;
   installer = pkgs.writeShellApplication {
     name = "install-flclashx";
-    runtimeInputs = [
-      pkgs.coreutils
-      pkgs.util-linux
-      pkgs.findutils
-    ];
+    runtimeInputs = [ pkgs.coreutils ];
     text = builtins.readFile ./install.sh;
   };
 in
@@ -45,6 +41,7 @@ in
     system.build.flclashxInstaller = installer;
     systemd.services.flclashx-install = {
       description = "Prepare the FlClashX bundle and setuid core in /opt";
+      stopIfChanged = true;
       wantedBy = [ "multi-user.target" ];
       before = [
         "display-manager.service"

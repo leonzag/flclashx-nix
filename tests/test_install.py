@@ -3,6 +3,7 @@
 import os
 from pathlib import Path
 import shutil
+import shlex
 import stat
 import subprocess
 import tempfile
@@ -29,16 +30,16 @@ class InstallFlClashX(unittest.TestCase):
         bundle = package / "share/flclashx"
         (bundle / "lib").mkdir(parents=True)
         for name in ["FlClashX", "FlClashCore"]:
-            shutil.copyfile("/bin/true", bundle / name)
+            shutil.copyfile(shutil.which("true"), bundle / name)
             (bundle / name).chmod(0o755)
         (bundle / "lib/library.so.1").write_text(version)
         (bundle / "lib/library.so").symlink_to("library.so.1")
         return package
 
-    def run_installer(self, package, success=True):
+    def run_installer(self, package, success=True, env=None):
         result = subprocess.run(
             ["bash", str(INSTALLER), str(package), str(self.opt)],
-            capture_output=True, text=True,
+            capture_output=True, text=True, env=env,
         )
         if success:
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -52,7 +53,8 @@ class InstallFlClashX(unittest.TestCase):
     def test_install_copies_bundle_and_sets_only_core_setuid(self):
         self.run_installer(self.v1)
         current = self.current()
-        self.assertTrue(current.is_symlink())
+        self.assertTrue(current.is_dir())
+        self.assertFalse(current.is_symlink())
         self.assertTrue(current.resolve().is_relative_to(self.opt))
         self.assertNotEqual(current.resolve(), self.v1 / "share/flclashx")
         core = (current / "FlClashCore").stat()
@@ -69,12 +71,13 @@ class InstallFlClashX(unittest.TestCase):
         self.run_installer(self.v1)
         self.assertEqual((self.current() / "FlClashCore").stat().st_ino, inode)
 
-    def test_update_removes_old_copy_and_rollback_recreates_it(self):
+    def test_service_restart_updates_and_rollback_restores_bundle(self):
         self.run_installer(self.v1)
-        old = self.current().resolve()
+        self.run_installer("--remove")
+        self.assertFalse(self.current().exists())
         self.run_installer(self.v2)
-        self.assertFalse(old.exists())
         self.assertEqual((self.current() / "lib/library.so").read_text(), "0.4.3")
+        self.run_installer("--remove")
         self.run_installer(self.v1)
         self.assertEqual((self.current() / "lib/library.so").read_text(), "0.4.2")
 
@@ -84,13 +87,29 @@ class InstallFlClashX(unittest.TestCase):
         (self.v2 / "share/flclashx/FlClashCore").unlink()
         self.run_installer(self.v2, success=False)
         self.assertEqual(self.current().resolve(), old)
+        self.assertEqual((self.current() / "lib/library.so").read_text(), "0.4.2")
 
-    def test_recovers_complete_copy_without_public_link(self):
+    def test_refuses_replacing_bundle_before_service_stop(self):
         self.run_installer(self.v1)
-        old = self.current().resolve()
-        self.current().unlink()
-        self.run_installer(self.v1)
-        self.assertEqual(self.current().resolve(), old)
+        self.run_installer(self.v2, success=False)
+        self.assertEqual((self.current() / "lib/library.so").read_text(), "0.4.2")
+
+    def test_failed_install_leaves_no_partial_bundle(self):
+        (self.v1 / "share/flclashx/FlClashCore").unlink()
+        self.run_installer(self.v1, success=False)
+        self.assertFalse(self.current().exists())
+        self.assertEqual(list(self.opt.glob(".FlClashX.*")), [])
+
+    def test_copy_failure_cleans_temporary_directory(self):
+        commands = self.root / "commands"
+        commands.mkdir()
+        fake_cp = commands / "cp"
+        fake_cp.write_text(f'#!/bin/sh\n{shlex.quote(shutil.which("cp"))} "$@"\nexit 1\n')
+        fake_cp.chmod(0o755)
+        env = dict(os.environ, PATH=f'{commands}:{os.environ["PATH"]}')
+        self.run_installer(self.v1, success=False, env=env)
+        self.assertFalse(self.current().exists())
+        self.assertEqual(list(self.opt.glob(".FlClashX.*")), [])
 
     def test_refuses_world_writable_directory(self):
         self.opt.mkdir(mode=0o777)
@@ -108,14 +127,32 @@ class InstallFlClashX(unittest.TestCase):
 
     def test_removal_is_idempotent_and_preserves_unmanaged_files(self):
         self.run_installer(self.v1)
-        unmanaged = self.opt / "FlClashX-versions/unmanaged"
+        unmanaged = self.opt / "another-app"
         unmanaged.mkdir()
         (unmanaged / "keep").write_text("keep")
         self.run_installer("--remove")
-        self.assertFalse(self.current().is_symlink())
-        self.assertFalse((self.opt / "FlClashX-versions" / self.v1.name).exists())
+        self.assertFalse(self.current().exists())
         self.assertEqual((unmanaged / "keep").read_text(), "keep")
         self.run_installer("--remove")
+
+    @unittest.skipUnless(os.environ.get("FLCLASHX_LEGACY_INSTALLER"), "legacy installer fixture not provided")
+    def test_migrate_from_legacy_service_and_rollback(self):
+        legacy = os.environ["FLCLASHX_LEGACY_INSTALLER"]
+
+        def run_legacy(package):
+            subprocess.run(["bash", legacy, str(package), str(self.opt)], check=True, capture_output=True)
+
+        run_legacy(self.v1)
+        self.assertTrue(self.current().is_symlink())
+        # NixOS runs the loaded old unit's ExecStop before loading the new unit.
+        run_legacy("--remove")
+        self.run_installer(self.v2)
+        self.assertFalse(self.current().is_symlink())
+        self.assertEqual((self.current() / "lib/library.so").read_text(), "0.4.3")
+        self.run_installer("--remove")
+        run_legacy(self.v1)
+        self.assertTrue(self.current().is_symlink())
+        self.assertEqual((self.current() / "lib/library.so").read_text(), "0.4.2")
 
 
 if __name__ == "__main__":
